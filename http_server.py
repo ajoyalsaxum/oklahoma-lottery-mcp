@@ -36,7 +36,6 @@ app = FastAPI(
     contact={"name": "Oklahoma Lottery Commission research tool"},
     servers=[
         {"url": "https://ok-lottery-rules.onrender.com", "description": "Production"},
-        {"url": "http://localhost:8000", "description": "Local dev"},
     ],
 )
 
