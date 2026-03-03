@@ -1,0 +1,11 @@
+# Python 3.10+ required (FastMCP and FastAPI both require >=3.10; project targets 3.11+)
+
+# MCP server (Claude Desktop)
+fastmcp>=2.0.0
+
+# HTTP server (Custom GPT Actions)
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Shared
+httpx>=0.27.0

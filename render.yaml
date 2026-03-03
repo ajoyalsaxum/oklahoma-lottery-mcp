@@ -1,0 +1,12 @@
+# render.yaml — one-click deploy on Render.com
+# Commit this file to GitHub, then go to render.com → New → Blueprint
+
+services:
+  - type: web
+    name: ok-lottery-rules
+    runtime: docker
+    plan: free          # free tier: 512 MB RAM, sleeps after 15 min inactivity
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
