@@ -2,8 +2,8 @@
 BASE_API_URL = "https://okadminrules-api.azurewebsites.net"
 SEARCH_API_URL = "https://oksearchrules.azurewebsites.net"
 
-# Default scoping
-DEFAULT_TITLE_FILTER = "429"          # Oklahoma Lottery Commission
+# Default scoping — empty string means all 177 OAC titles
+DEFAULT_TITLE_FILTER = ""
 DEFAULT_PAGE_SIZE = 50
 
 # HTTP settings

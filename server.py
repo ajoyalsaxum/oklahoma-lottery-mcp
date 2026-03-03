@@ -1,8 +1,8 @@
 """
 Oklahoma Administrative Rules — FastMCP server
 
-Provides live access to the Oklahoma Administrative Code (OAC) via the
-official state API, scoped by default to Title 429 (Oklahoma Lottery Commission).
+Provides live access to the full Oklahoma Administrative Code (OAC) —
+all 177 agencies — via the official state API.
 
 Transport: stdio (for Claude Desktop / MCP clients)
 """
@@ -23,12 +23,11 @@ from constants import (
 mcp = FastMCP(
     "Oklahoma Administrative Rules",
     instructions=(
-        "Provides live access to the Oklahoma Administrative Code (OAC). "
-        "Tools default to Title 429 (Oklahoma Lottery Commission). "
-        "Pass title_filter='' to search across all OAC titles. "
-        "Use search_rules() to find content, get_rule() to read full text, "
-        "get_children() to navigate the rule tree, and list_chapters() as a "
-        "quick entry point into Title 429."
+        "Provides live access to the full Oklahoma Administrative Code (OAC) — "
+        "all 177 state agencies. "
+        "Use list_titles() to see all agencies, list_chapters(title_number) to browse "
+        "chapters of a specific title, search_rules() to find content by keyword, "
+        "get_rule() to read full text, and get_children() to navigate the rule tree."
     ),
 )
 
@@ -474,23 +473,27 @@ async def get_all_rules(
 # ── tool 6: list_chapters ────────────────────────────────────────────────────
 
 @mcp.tool()
-async def list_chapters() -> str:
+async def list_chapters(title_number: str) -> str:
     """
-    List all chapters under Title 429 — Oklahoma Lottery Commission.
+    List all chapters under any OAC title/agency.
 
-    Automatically discovers Title 429's root segment ID from the rules index,
-    then fetches its direct children (chapters) from the API.
+    Looks up the title by its reference code, then fetches its direct
+    children (chapters) from the API.
 
-    No arguments required.
+    Args:
+        title_number: OAC title reference code, e.g. "429" for Oklahoma
+                      Lottery Commission, "310" for State Dept of Health,
+                      "340" for Dept of Human Services. Use list_titles()
+                      to discover all available title numbers.
 
     Returns each chapter with its ID, title, and citation code.
     Use get_children(chapter_id) to drill into sections within a chapter.
     """
-    cache_key = "list_chapters:429"
+    cache_key = f"list_chapters:{title_number}"
     if hit := cache.get(cache_key):
         return hit
 
-    # ── Step 1: locate Title 429 in GetAllRules ──────────────────────────────
+    # ── Step 1: locate the title in GetAllRules ──────────────────────────────
     try:
         all_rules = await api.get_all_rules(page=1, page_size=200)
     except httpx.HTTPStatusError as e:
@@ -498,32 +501,30 @@ async def list_chapters() -> str:
     except httpx.RequestError as e:
         return f"Network error fetching rules index: {e}"
 
-    title_429: dict | None = None
+    matched: dict | None = None
     for rule in all_rules:
-        ref = str(rule.get("referenceCode", ""))
-        title_text = (rule.get("title") or "").lower()
-        if ref == "429" or "lottery" in title_text:
-            title_429 = rule
+        if str(rule.get("referenceCode", "")) == title_number:
+            matched = rule
             break
 
-    if not title_429:
+    if not matched:
         refs = ", ".join(str(r.get("referenceCode", "?")) for r in all_rules[:30])
         return (
-            "Could not locate Title 429 (Oklahoma Lottery Commission) in the first 200 rules.\n"
-            f"Reference codes found: {refs}\n"
-            "Try get_all_rules(title_filter='') to inspect all available titles."
+            f"Title {title_number!r} not found in the rules index.\n"
+            f"Sample reference codes: {refs}\n"
+            "Use list_titles() to see all available title numbers."
         )
 
-    seg_id = title_429.get("segmentId") or title_429.get("id")
-    title_name = title_429.get("title") or "Oklahoma Lottery Commission"
-    rule_id = title_429.get("id")
+    seg_id = matched.get("segmentId") or matched.get("id")
+    title_name = matched.get("title") or f"Title {title_number}"
+    rule_id = matched.get("id")
 
-    # ── Step 2: fetch children (chapters) ───────────────────────────────────
+    # ── Step 2: fetch children (chapters) ────────────────────────────────────
     try:
         chapters = await api.get_segments_by_parent_id(seg_id)
     except httpx.HTTPStatusError as e:
         return (
-            f"Found Title 429 (segment ID {seg_id}) but the chapter fetch returned "
+            f"Found {title_name} (segment ID {seg_id}) but chapter fetch returned "
             f"HTTP {e.response.status_code}.\n"
             f"Try get_children({seg_id}) directly."
         )
@@ -532,13 +533,13 @@ async def list_chapters() -> str:
 
     if not chapters:
         return (
-            f"Title 429 found (ID: {rule_id}, segment ID: {seg_id}) but no chapters returned.\n"
-            f"Try get_children({seg_id}) directly, or call get_rule({rule_id}) for metadata."
+            f"{title_name} found (ID: {rule_id}, segment ID: {seg_id}) but no chapters returned.\n"
+            f"Try get_children({seg_id}) directly, or get_rule({rule_id}) for metadata."
         )
 
     lines = [
         f"Chapters of {title_name}",
-        f"OAC Title 429  |  Segment ID: {seg_id}  |  Rule ID: {rule_id}",
+        f"OAC Title {title_number}  |  Segment ID: {seg_id}  |  Rule ID: {rule_id}",
         f"Chapters found: {len(chapters)}",
         _source_line(
             f"{BASE_API_URL}/GetSegmentsByParentId?parentId={seg_id}&includeWIP=false"
@@ -549,10 +550,7 @@ async def list_chapters() -> str:
     for ch in chapters:
         ch_id = ch.get("id") or ch.get("segmentId") or "?"
         ch_title = (
-            ch.get("title")
-            or ch.get("description")
-            or ch.get("name")
-            or "Untitled"
+            ch.get("title") or ch.get("description") or ch.get("name") or "Untitled"
         )
         ch_ref = ch.get("referenceCode") or ch.get("citation") or ""
         ch_type = ch.get("segmentType") or ch.get("segmentTypeName") or ""
@@ -567,6 +565,48 @@ async def list_chapters() -> str:
             lines.append(f"              Notes:     {ch_notes[:120]}")
         lines.append(f"              → get_children({ch_id}) to see sections")
         lines.append(f"              → get_rule({ch_id}) for chapter text")
+        lines.append("")
+
+    out = _truncate("\n".join(lines))
+    cache.set(cache_key, out)
+    return out
+
+
+# ── tool 7: list_titles ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def list_titles() -> str:
+    """
+    List all 177 agencies/titles in the Oklahoma Administrative Code.
+
+    Returns every OAC title with its reference code, name, and segment ID.
+    Use the reference code with list_chapters(title_number) to browse
+    chapters of any agency, or use search_rules(query) to search across all.
+    """
+    cache_key = "list_titles:all"
+    if hit := cache.get(cache_key):
+        return hit
+
+    try:
+        rules = await api.get_all_rules(page=1, page_size=200)
+    except httpx.HTTPStatusError as e:
+        return f"Failed to fetch rules index (HTTP {e.response.status_code})."
+    except httpx.RequestError as e:
+        return f"Network error: {e}"
+
+    lines = [
+        "Oklahoma Administrative Code — All Agencies",
+        f"Total titles: {len(rules)}",
+        _source_line(f"{BASE_API_URL}/GetAllRules?pageNumber=1&pageSize=200&filter=false"),
+        "",
+    ]
+
+    for rule in rules:
+        ref = rule.get("referenceCode", "?")
+        title = rule.get("title") or "Untitled"
+        seg_id = rule.get("segmentId") or rule.get("id") or "?"
+        lines.append(f"  [{ref:>4}]  {title}")
+        lines.append(f"           Segment ID: {seg_id}  → list_chapters({ref!r})")
         lines.append("")
 
     out = _truncate("\n".join(lines))

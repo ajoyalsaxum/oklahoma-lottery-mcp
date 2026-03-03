@@ -1,9 +1,8 @@
 """
 http_server.py — FastAPI HTTP layer for Custom GPT Actions.
 
-Exposes the same 6 tools as REST endpoints with structured JSON responses.
-FastAPI auto-generates the OpenAPI spec at /openapi.json, which you paste
-directly into a Custom GPT Action.
+Exposes 7 REST endpoints covering the full Oklahoma Administrative Code
+(all 177 agencies). FastAPI auto-generates the OpenAPI spec at /openapi.json.
 
 Start locally:
     uvicorn http_server:app --reload --port 8000
@@ -29,9 +28,9 @@ from constants import BASE_API_URL, SEARCH_API_URL, DEFAULT_TITLE_FILTER
 app = FastAPI(
     title="Oklahoma Administrative Rules",
     description=(
-        "Live access to the Oklahoma Administrative Code (OAC) via the official "
-        "Oklahoma state API. Defaults to Title 429 — Oklahoma Lottery Commission. "
-        "Pass title_filter='' to query the full OAC."
+        "Live access to the full Oklahoma Administrative Code (OAC) — all 177 state agencies. "
+        "Use GET /titles to see every agency, GET /chapters to browse chapters of any title, "
+        "and GET /search to find rules by keyword."
     ),
     version="1.0.0",
     contact={"name": "Oklahoma Lottery Commission research tool"},
@@ -154,11 +153,25 @@ class Chapter(BaseModel):
 
 
 class ChaptersResponse(BaseModel):
+    title_number: str
     title_name: str
-    title_429_segment_id: int | str
-    title_429_rule_id: int | str
+    segment_id: int | str
+    rule_id: int | str
     chapter_count: int
     chapters: list[Chapter]
+    source_url: str
+
+
+class TitleItem(BaseModel):
+    reference_code: str
+    title: str
+    segment_id: int | str
+    rule_id: int | str
+
+
+class TitlesResponse(BaseModel):
+    total_count: int
+    titles: list[TitleItem]
     source_url: str
 
 
@@ -436,43 +449,50 @@ async def get_all_rules(
 @app.get(
     "/chapters",
     response_model=ChaptersResponse,
-    summary="List all chapters under Title 429 — Oklahoma Lottery Commission",
+    summary="List all chapters under any OAC title/agency",
     tags=["Navigation"],
 )
-async def list_chapters() -> ChaptersResponse:
+async def list_chapters(
+    title_number: str = Query(
+        ...,
+        description=(
+            "OAC title reference code, e.g. '429' (Oklahoma Lottery Commission), "
+            "'310' (State Dept of Health), '340' (Dept of Human Services). "
+            "Call GET /titles first to discover all available codes."
+        ),
+    ),
+) -> ChaptersResponse:
     """
-    Auto-discovers Title 429's root segment ID and returns all chapters.
-    This is the best starting point for browsing OLC rules.
+    Returns all chapters for any OAC title/agency.
+
+    Use GET /titles to find the reference code for any agency, then pass
+    it here to browse that agency's chapters.
 
     Follow up with `GET /children/{chapter_id}` to see sections within a chapter.
     """
-    cache_key = "http:chapters:429"
+    cache_key = f"http:chapters:{title_number}"
     if hit := cache.get(cache_key):
         return hit
 
-    # Step 1 — find Title 429
+    # Step 1 — find the title
     try:
         all_rules = await api.get_all_rules(page=1, page_size=200)
     except Exception as e:
         _http_error(e, "Rules index")
 
-    title_429 = next(
-        (
-            r for r in all_rules
-            if str(r.get("referenceCode", "")) == "429"
-            or "lottery" in (r.get("title") or "").lower()
-        ),
+    matched = next(
+        (r for r in all_rules if str(r.get("referenceCode", "")) == title_number),
         None,
     )
-    if not title_429:
+    if not matched:
         raise HTTPException(
             status_code=404,
-            detail="Title 429 not found in the rules index. Try GET /rules?title_filter= to see all titles.",
+            detail=f"Title {title_number!r} not found. Call GET /titles to see all available codes.",
         )
 
-    seg_id = title_429.get("segmentId") or title_429.get("id")
-    rule_id = title_429.get("id")
-    title_name = title_429.get("title") or "Oklahoma Lottery Commission"
+    seg_id = matched.get("segmentId") or matched.get("id")
+    rule_id = matched.get("id")
+    title_name = matched.get("title") or f"Title {title_number}"
 
     # Step 2 — get chapters
     try:
@@ -483,7 +503,7 @@ async def list_chapters() -> ChaptersResponse:
     if not chapters:
         raise HTTPException(
             status_code=404,
-            detail=f"Title 429 found (segment {seg_id}) but no chapters returned. Try GET /children/{seg_id}.",
+            detail=f"{title_name} found (segment {seg_id}) but no chapters returned. Try GET /children/{seg_id}.",
         )
 
     items = [
@@ -497,12 +517,55 @@ async def list_chapters() -> ChaptersResponse:
     ]
 
     out = ChaptersResponse(
+        title_number=title_number,
         title_name=title_name,
-        title_429_segment_id=seg_id,
-        title_429_rule_id=rule_id,
+        segment_id=seg_id,
+        rule_id=rule_id,
         chapter_count=len(items),
         chapters=items,
         source_url=f"{BASE_API_URL}/GetSegmentsByParentId?parentId={seg_id}&includeWIP=false",
+    )
+    cache.set(cache_key, out)
+    return out
+
+
+@app.get(
+    "/titles",
+    response_model=TitlesResponse,
+    summary="List all 177 agencies in the Oklahoma Administrative Code",
+    tags=["Navigation"],
+)
+async def list_titles() -> TitlesResponse:
+    """
+    Returns every OAC title (all 177 state agencies) with reference codes
+    and segment IDs.
+
+    Use the `reference_code` with `GET /chapters?title_number=<code>` to
+    browse chapters of any agency, or use `GET /search` to search across all.
+    """
+    cache_key = "http:titles:all"
+    if hit := cache.get(cache_key):
+        return hit
+
+    try:
+        rules = await api.get_all_rules(page=1, page_size=200)
+    except Exception as e:
+        _http_error(e, "Rules index")
+
+    items = [
+        TitleItem(
+            reference_code=str(r.get("referenceCode") or ""),
+            title=r.get("title") or "Untitled",
+            segment_id=r.get("segmentId") or r.get("id") or 0,
+            rule_id=r.get("id") or 0,
+        )
+        for r in rules
+    ]
+
+    out = TitlesResponse(
+        total_count=len(items),
+        titles=items,
+        source_url=f"{BASE_API_URL}/GetAllRules?pageNumber=1&pageSize=200&filter=false",
     )
     cache.set(cache_key, out)
     return out
